@@ -1,0 +1,129 @@
+name: Replay E2E (front-back contract)
+
+# Guards the front-back contract via record/replay (no API key in CI):
+#   Layer 1 — backend golden: replay a recorded trace through the real gateway,
+#             assert the SSE event sequence matches the committed golden.
+#   Layer 2 — full-stack render: real Next.js frontend + real gateway (replay
+#             model) + Chromium; assert the replayed turns render in the browser.
+# Triggered by changes on EITHER side of the contract so a backend change can no
+# longer pass without the frontend-facing checks running.
+
+on:
+  push:
+    branches: ["main", "2.0.x-dev"]
+    paths:
+      - "frontend/**"
+      - "backend/app/gateway/**"
+      - "backend/packages/harness/**"
+      - "backend/tests/fixtures/replay/**"
+      - "backend/tests/replay_provider.py"
+      - "backend/tests/_replay_fixture.py"
+      - "backend/tests/seed_runs_router.py"
+      - "backend/tests/test_replay_golden.py"
+      - "backend/scripts/run_replay_gateway.py"
+      - ".github/workflows/replay-e2e.yml"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "frontend/**"
+      - "backend/app/gateway/**"
+      - "backend/packages/harness/**"
+      - "backend/tests/fixtures/replay/**"
+      - "backend/tests/replay_provider.py"
+      - "backend/tests/_replay_fixture.py"
+      - "backend/tests/seed_runs_router.py"
+      - "backend/tests/test_replay_golden.py"
+      - "backend/scripts/run_replay_gateway.py"
+      - ".github/workflows/replay-e2e.yml"
+
+concurrency:
+  group: replay-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+
+jobs:
+  backend-replay-golden:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install backend development dependencies
+        working-directory: backend
+        run: uv sync --locked --group dev
+
+      - name: Run backend replay golden test
+        working-directory: backend
+        run: PYTHONPATH=. uv run pytest tests/test_replay_golden.py
+
+  fullstack-replay-render:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install replay gateway backend development dependencies
+        working-directory: backend
+        run: uv sync --locked --group dev
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.26.2"
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies from lockfile
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium and system dependencies
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run full-stack replay render tests
+        id: playwright
+        continue-on-error: true
+        working-directory: frontend
+        run: pnpm exec playwright test -c playwright.real-backend.config.ts --reporter=github,html
+
+      - name: Upload Playwright report and rendered screenshots
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-and-rendered-screenshots
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          if-no-files-found: warn
+
+      - name: Fail job when Playwright tests failed
+        if: ${{ always() && !cancelled() && steps.playwright.outcome == 'failure' }}
+        run: exit 1
