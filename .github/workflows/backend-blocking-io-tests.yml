@@ -1,0 +1,49 @@
+name: Backend Blocking IO
+
+on:
+  push:
+    branches: ["main", "2.0.x-dev"]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-blocking-io-tests.yml"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-blocking-io-tests.yml"
+
+concurrency:
+  group: blocking-io-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+
+jobs:
+  backend-blocking-io:
+    name: Backend blocking IO regression
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: backend/.python-version
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install backend and development dependencies
+        working-directory: backend
+        run: uv sync --dev
+
+      - name: Run blocking IO regression tests
+        working-directory: backend
+        run: make test-blocking-io
